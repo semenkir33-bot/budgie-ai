@@ -8,6 +8,8 @@ import io
 import re
 import secrets
 import string
+import base64
+import requests
 from datetime import datetime, timedelta
 from openai import OpenAI
 
@@ -160,13 +162,24 @@ def handle_draw(message):
             n=1,
             size="1024x1024"
         )
-        image_url = response.data[0].url
-        bot.send_photo(message.chat.id, image_url, caption=f"🖼 <b>{prompt}</b>", parse_mode='HTML')
+        img_data = response.data[0]
+        
+        # Обработка base64
+        if hasattr(img_data, 'b64_json') and img_data.b64_json:
+            image_bytes = base64.b64decode(img_data.b64_json)
+            bot.send_photo(message.chat.id, image_bytes, caption=f"🖼 <b>{prompt}</b>", parse_mode='HTML')
+        # Обработка прямой ссылки
+        elif hasattr(img_data, 'url') and img_data.url:
+            res = requests.get(img_data.url, timeout=30)
+            bot.send_photo(message.chat.id, res.content, caption=f"🖼 <b>{prompt}</b>", parse_mode='HTML')
+        else:
+            raise Exception("Не удалось получить изображение от провайдера.")
+
         bot.delete_message(message.chat.id, sent_msg.message_id)
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка генерации: {e}", message.chat.id, sent_msg.message_id)
 
-# --- ДИАЛОГ И АВТОМАТИЧЕСКАЯ ОТПРАВКА КОДА ФАЙЛОМ ---
+# --- ДИАЛОГ, НАРЕЗКА ДЛИННЫХ СООБЩЕНИЙ И ФАЙЛЫ С КОДОМ ---
 @bot.message_handler(func=lambda m: True)
 def handle_chat_and_auth(message):
     user_id = message.from_user.id
@@ -211,18 +224,26 @@ def handle_chat_and_auth(message):
         response = ai_client.chat.completions.create(
             model=user_model,
             messages=messages_payload,
-            max_tokens=2000,
+            max_tokens=2500,
             temperature=0.7
         )
         answer = response.choices[0].message.content
         chat_histories[user_id].append({"role": "assistant", "content": answer})
         
-        try:
-            bot.edit_message_text(answer, message.chat.id, sent_msg.message_id, parse_mode='Markdown')
-        except Exception:
-            bot.edit_message_text(answer, message.chat.id, sent_msg.message_id)
+        # Нарезка длинного сообщения, если больше лимита Telegram (4000 знаков)
+        chunk_size = 4000
+        if len(answer) <= chunk_size:
+            try:
+                bot.edit_message_text(answer, message.chat.id, sent_msg.message_id, parse_mode='Markdown')
+            except Exception:
+                bot.edit_message_text(answer, message.chat.id, sent_msg.message_id)
+        else:
+            bot.delete_message(message.chat.id, sent_msg.message_id)
+            for i in range(0, len(answer), chunk_size):
+                chunk = answer[i:i + chunk_size]
+                bot.send_message(message.chat.id, chunk)
 
-        # Поиск кода и упаковка в файл
+        # Поиск кода и отправка отдельным файлом
         code_blocks = re.findall(r'```([a-zA-Z0-9_]*)\n(.*?)```', answer, re.DOTALL)
         if code_blocks:
             for idx, (lang, code_text) in enumerate(code_blocks):
@@ -242,4 +263,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     Thread(target=lambda: app.run(host='0.0.0.0', port=port)).start()
     bot.infinity_polling()
-          
+    
